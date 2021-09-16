@@ -363,14 +363,6 @@ static void e1000_down_and_stop(struct e1000_adapter *adapter)
 
 	cancel_delayed_work_sync(&adapter->watchdog_task);
 
-	/*
-	 * Since the watchdog task can reschedule other tasks, we should cancel
-	 * it first, otherwise we can run into the situation when a work is
-	 * still running after the adapter has been turned down.
-	 */
-
-	cancel_delayed_work_sync(&adapter->phy_info_task);
-	//cancel_delayed_work_sync(&adapter->fifo_stall_task);
 
 	/* Only kill reset task if adapter is not resetting */
 	if (!test_bit(__E1000_RESETTING, &adapter->flags))
@@ -444,7 +436,6 @@ void e1000_reset(struct e1000_adapter *adapter)
 	struct e1000_hw *hw = &adapter->hw;
 	u32 pba = 0, tx_space, min_tx_space, min_rx_space;
 	bool legacy_pba_adjust = false;
-	u16 hwm;
 
 	/* Repartition Pba for greater than 9k mtu
 	 * To take effect CTRL.RST is required.
@@ -520,24 +511,6 @@ void e1000_reset(struct e1000_adapter *adapter)
 
 	ew32(PBA, pba);
 
-	/* flow control settings:
-	 * The high water mark must be low enough to fit one full frame
-	 * (or the size used for early receive) above it in the Rx FIFO.
-	 * Set it to the lower of:
-	 * - 90% of the Rx FIFO size, and
-	 * - the full Rx FIFO size minus the early receive size (for parts
-	 *   with ERT support assuming ERT set to E1000_ERT_2048), or
-	 * - the full Rx FIFO size minus one full frame
-	 */
-	hwm = min(((pba << 10) * 9 / 10),
-		  ((pba << 10) - hw->max_frame_size));
-
-	hw->fc_high_water = hwm & 0xFFF8;	/* 8-byte granularity */
-	hw->fc_low_water = hw->fc_high_water - 8;
-	hw->fc_pause_time = E1000_FC_PAUSE_TIME;
-	hw->fc_send_xon = 1;
-	hw->fc = hw->original_fc;
-
 	/* Allow time for pending master requests to run */
 	e1000_reset_hw(hw);
 
@@ -555,9 +528,6 @@ void e1000_reset(struct e1000_adapter *adapter)
 		ctrl &= ~E1000_CTRL_SWDPIN3;
 		ew32(CTRL, ctrl);
 	}
-
-
-	e1000_reset_adaptive(hw);
 
 	e1000_release_manageability(adapter);
 }
@@ -611,41 +581,6 @@ static void e1000_dump_eeprom(struct e1000_adapter *adapter)
 }
 
 
-static netdev_features_t e1000_fix_features(struct net_device *netdev,
-	netdev_features_t features)
-{
-	/* Since there is no support for separate Rx/Tx vlan accel
-	 * enable/disable make sure Tx flag is always in same state as Rx.
-	 */
-	if (features & NETIF_F_HW_VLAN_CTAG_RX)
-		features |= NETIF_F_HW_VLAN_CTAG_TX;
-	else
-		features &= ~NETIF_F_HW_VLAN_CTAG_TX;
-
-	return features;
-}
-
-static int e1000_set_features(struct net_device *netdev,
-	netdev_features_t features)
-{
-	struct e1000_adapter *adapter = netdev_priv(netdev);
-	netdev_features_t changed = features ^ netdev->features;
-
-
-	if (!(changed & (NETIF_F_RXCSUM | NETIF_F_RXALL)))
-		return 0;
-
-	netdev->features = features;
-	adapter->rx_csum = !!(features & NETIF_F_RXCSUM);
-
-	if (netif_running(netdev))
-		e1000_reinit_locked(adapter);
-	else
-		e1000_reset(adapter);
-
-	return 1;
-}
-
 static const struct net_device_ops e1000_netdev_ops = {
 	.ndo_open		= e1000_open,
 	.ndo_stop		= e1000_close,
@@ -653,8 +588,6 @@ static const struct net_device_ops e1000_netdev_ops = {
 	.ndo_set_rx_mode	= e1000_set_rx_mode,
 	.ndo_tx_timeout		= e1000_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_fix_features	= e1000_fix_features,
-	.ndo_set_features	= e1000_set_features,
 };
 
 /**
@@ -686,27 +619,8 @@ static int e1000_init_hw_struct(struct e1000_adapter *adapter,
 			     ENET_HEADER_SIZE + ETHERNET_FCS_SIZE;
 	hw->min_frame_size = MINIMUM_ETHERNET_FRAME_SIZE;
 
-	/* identify the MAC */
-	if (e1000_set_mac_type(hw)) {
-		e_err(probe, "Unknown MAC Type\n");
-		return -EIO;
-	}
 
 
-	e1000_set_media_type(hw);
-	e1000_get_bus_info(hw);
-
-	hw->wait_autoneg_complete = false;
-	hw->tbi_compatibility_en = true;
-	hw->adaptive_ifs = true;
-
-	/* Copper options */
-
-	if (hw->media_type == e1000_media_type_copper) {
-		hw->mdix = AUTO_ALL_MODES;
-		hw->disable_polarity_correction = false;
-		hw->master_slave = E1000_MASTER_SLAVE;
-	}
 
 	return 0;
 }
@@ -852,7 +766,6 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	netdev->min_mtu = ETH_ZLEN - ETH_HLEN;
 	netdev->max_mtu = 1518 - (ETH_HLEN + ETH_FCS_LEN);
 
-	adapter->en_mng_pt = e1000_enable_mng_pass_thru(hw);
 
 	/* initialize eeprom parameters */
 	if (e1000_init_eeprom_params(hw)) {
@@ -914,10 +827,6 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	pr_info("%s\n", "naftaly: 1");
 	/* Checksum Offload Enable/Disable */
 	adapter->rx_csum = 1;
-
-	/* Flow Control */
-	adapter->hw.fc = E1000_FC_NONE;
-
 
 	/* Transmit Interrupt Delay */
 	adapter->tx_int_delay = DEFAULT_TIDV;
@@ -1388,7 +1297,6 @@ static void e1000_configure_tx(struct e1000_adapter *adapter)
 	tctl |= E1000_TCTL_PSP | E1000_TCTL_RTLC |
 		(E1000_COLLISION_THRESHOLD << E1000_CT_SHIFT);
 
-	e1000_config_collision_dist(hw);
 
 	/* Setup Transmit Descriptor Settings for eop descriptor */
 	adapter->txd_cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS;
@@ -1519,10 +1427,8 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
 		E1000_RCTL_RDMTS_HALF |
 		(hw->mc_filter_type << E1000_RCTL_MO_SHIFT);
 
-	if (hw->tbi_compatibility_on == 1)
-		rctl |= E1000_RCTL_SBP;
-	else
-		rctl &= ~E1000_RCTL_SBP;
+
+	rctl &= ~E1000_RCTL_SBP;
 
 	if (adapter->netdev->mtu <= ETH_DATA_LEN)
 		rctl &= ~E1000_RCTL_LPE;
@@ -1945,40 +1851,6 @@ static void e1000_set_rx_mode(struct net_device *netdev)
 }
 
 
-bool e1000_has_link(struct e1000_adapter *adapter)
-{
-	struct e1000_hw *hw = &adapter->hw;
-	bool link_active = false;
-
-	/* get_link_status is set on LSC (link status) interrupt or rx
-	 * sequence error interrupt (except on intel ce4100).
-	 * get_link_status will stay false until the
-	 * e1000_check_for_link establishes link for copper adapters
-	 * ONLY
-	 */
-	switch (hw->media_type) {
-	case e1000_media_type_copper:
-		if (hw->get_link_status) {
-			e1000_check_for_link(hw);
-			link_active = !hw->get_link_status;
-		} else {
-			link_active = true;
-		}
-		break;
-	case e1000_media_type_fiber:
-		e1000_check_for_link(hw);
-		link_active = !!(er32(STATUS) & E1000_STATUS_LU);
-		break;
-	case e1000_media_type_internal_serdes:
-		e1000_check_for_link(hw);
-		link_active = hw->serdes_has_link;
-		break;
-	default:
-		break;
-	}
-
-	return link_active;
-}
 
 /**
  * e1000_watchdog - work function
@@ -1991,43 +1863,15 @@ static void e1000_watchdog(struct work_struct *work)
 						     watchdog_task.work);
 	struct e1000_hw *hw = &adapter->hw;
 	struct net_device *netdev = adapter->netdev;
-	struct e1000_tx_ring *txdr = adapter->tx_ring;
 	u32 link, tctl;
 
-	link = e1000_has_link(adapter);
+	link = true; //e1000_has_link(adapter);
 	if ((netif_carrier_ok(netdev)) && link)
-		goto link_up;
+		return;
 
 	if (link) {
 		if (!netif_carrier_ok(netdev)) {
-			u32 ctrl;
-			/* update snapshot of PHY registers on LSC */
-			e1000_get_speed_and_duplex(hw,
-						   &adapter->link_speed,
-						   &adapter->link_duplex);
-
-			ctrl = er32(CTRL);
-			pr_info("%s NIC Link is Up %d Mbps %s, "
-				"Flow Control: %s\n",
-				netdev->name,
-				adapter->link_speed,
-				adapter->link_duplex == FULL_DUPLEX ?
-				"Full Duplex" : "Half Duplex",
-				((ctrl & E1000_CTRL_TFCE) && (ctrl &
-				E1000_CTRL_RFCE)) ? "RX/TX" : ((ctrl &
-				E1000_CTRL_RFCE) ? "RX" : ((ctrl &
-				E1000_CTRL_TFCE) ? "TX" : "None")));
-
-			/* adjust timeout factor according to speed/duplex */
-			adapter->tx_timeout_factor = 1;
-			switch (adapter->link_speed) {
-			case SPEED_10:
-				adapter->tx_timeout_factor = 16;
-				break;
-			case SPEED_100:
-				/* maybe add some timeout factor ? */
-				break;
-			}
+			pr_info("%s NIC Link is Up", netdev->name);
 
 			/* enable transmits in the hardware */
 			tctl = er32(TCTL);
@@ -2035,58 +1879,17 @@ static void e1000_watchdog(struct work_struct *work)
 			ew32(TCTL, tctl);
 
 			netif_carrier_on(netdev);
-			adapter->smartspeed = 0;
 		}
 	} else {
 		if (netif_carrier_ok(netdev)) {
 			adapter->link_speed = 0;
 			adapter->link_duplex = 0;
-			pr_info("%s NIC Link is Down\n",
-				netdev->name);
+			pr_info("%s NIC Link is Down\n", netdev->name);
 			netif_carrier_off(netdev);
-
-
 		}
 
 	}
 
-link_up:
-
-	hw->tx_packet_delta = adapter->stats.tpt - adapter->tpt_old;
-	adapter->tpt_old = adapter->stats.tpt;
-	hw->collision_delta = adapter->stats.colc - adapter->colc_old;
-	adapter->colc_old = adapter->stats.colc;
-
-	adapter->gorcl = adapter->stats.gorcl - adapter->gorcl_old;
-	adapter->gorcl_old = adapter->stats.gorcl;
-	adapter->gotcl = adapter->stats.gotcl - adapter->gotcl_old;
-	adapter->gotcl_old = adapter->stats.gotcl;
-
-	e1000_update_adaptive(hw);
-
-	if (!netif_carrier_ok(netdev)) {
-		if (E1000_DESC_UNUSED(txdr) + 1 < txdr->count) {
-			/* We've lost link, so the controller stops DMA,
-			 * but we've got queued Tx work that's never going
-			 * to get done, so reset controller to flush Tx.
-			 * (Do the reset outside of interrupt context).
-			 */
-			adapter->tx_timeout_count++;
-			schedule_work(&adapter->reset_task);
-			/* exit immediately since reset is imminent */
-			return;
-		}
-	}
-
-	/* Cause software interrupt to ensure rx ring is cleaned */
-	ew32(ICS, E1000_ICS_RXDMT0);
-
-	/* Force detection of hung controller every watchdog period */
-	adapter->detect_tx_hung = true;
-
-	/* Reschedule the task */
-	if (!test_bit(__E1000_DOWN, &adapter->flags))
-		schedule_delayed_work(&adapter->watchdog_task, 2 * HZ);
 }
 
 enum latency_range {
@@ -3226,103 +3029,7 @@ static void e1000_receive_skb(struct e1000_adapter *adapter, u8 status,
 	napi_gro_receive(&adapter->napi, skb);
 }
 
-/**
- * e1000_tbi_adjust_stats
- * @hw: Struct containing variables accessed by shared code
- * @stats: point to stats struct
- * @frame_len: The length of the frame in question
- * @mac_addr: The Ethernet destination address of the frame in question
- *
- * Adjusts the statistic counters when a frame is accepted by TBI_ACCEPT
- */
-static void e1000_tbi_adjust_stats(struct e1000_hw *hw,
-				   struct e1000_hw_stats *stats,
-				   u32 frame_len, const u8 *mac_addr)
-{
-	u64 carry_bit;
 
-	/* First adjust the frame length. */
-	frame_len--;
-	/* We need to adjust the statistics counters, since the hardware
-	 * counters overcount this packet as a CRC error and undercount
-	 * the packet as a good packet
-	 */
-	/* This packet should not be counted as a CRC error. */
-	stats->crcerrs--;
-	/* This packet does count as a Good Packet Received. */
-	stats->gprc++;
-
-	/* Adjust the Good Octets received counters */
-	carry_bit = 0x80000000 & stats->gorcl;
-	stats->gorcl += frame_len;
-	/* If the high bit of Gorcl (the low 32 bits of the Good Octets
-	 * Received Count) was one before the addition,
-	 * AND it is zero after, then we lost the carry out,
-	 * need to add one to Gorch (Good Octets Received Count High).
-	 * This could be simplified if all environments supported
-	 * 64-bit integers.
-	 */
-	if (carry_bit && ((stats->gorcl & 0x80000000) == 0))
-		stats->gorch++;
-	/* Is this a broadcast or multicast?  Check broadcast first,
-	 * since the test for a multicast frame will test positive on
-	 * a broadcast frame.
-	 */
-	if (is_broadcast_ether_addr(mac_addr))
-		stats->bprc++;
-	else if (is_multicast_ether_addr(mac_addr))
-		stats->mprc++;
-
-	if (frame_len == hw->max_frame_size) {
-		/* In this case, the hardware has overcounted the number of
-		 * oversize frames.
-		 */
-		if (stats->roc > 0)
-			stats->roc--;
-	}
-
-	/* Adjust the bin counters when the extra byte put the frame in the
-	 * wrong bin. Remember that the frame_len was adjusted above.
-	 */
-	if (frame_len == 64) {
-		stats->prc64++;
-		stats->prc127--;
-	} else if (frame_len == 127) {
-		stats->prc127++;
-		stats->prc255--;
-	} else if (frame_len == 255) {
-		stats->prc255++;
-		stats->prc511--;
-	} else if (frame_len == 511) {
-		stats->prc511++;
-		stats->prc1023--;
-	} else if (frame_len == 1023) {
-		stats->prc1023++;
-		stats->prc1522--;
-	} else if (frame_len == 1522) {
-		stats->prc1522++;
-	}
-}
-
-static bool e1000_tbi_should_accept(struct e1000_adapter *adapter,
-				    u8 status, u8 errors,
-				    u32 length, const u8 *data)
-{
-	struct e1000_hw *hw = &adapter->hw;
-	u8 last_byte = *(data + length - 1);
-
-	if (TBI_ACCEPT(hw, status, errors, length, last_byte)) {
-		unsigned long irq_flags;
-
-		spin_lock_irqsave(&adapter->stats_lock, irq_flags);
-		e1000_tbi_adjust_stats(hw, &adapter->stats, length, data);
-		spin_unlock_irqrestore(&adapter->stats_lock, irq_flags);
-
-		return true;
-	}
-
-	return false;
-}
 
 static struct sk_buff *e1000_alloc_rx_skb(struct e1000_adapter *adapter,
 					  unsigned int bufsz)
@@ -3446,20 +3153,6 @@ static bool e1000_clean_rx_irq(struct e1000_adapter *adapter,
 			goto next_desc;
 		}
 
-		if (unlikely(rx_desc->errors & E1000_RXD_ERR_FRAME_ERR_MASK)) {
-			if (e1000_tbi_should_accept(adapter, status,
-						    rx_desc->errors,
-						    length, data)) {
-				length--;
-			} else if (netdev->features & NETIF_F_RXALL) {
-				goto process_skb;
-			} else {
-				dev_kfree_skb(skb);
-				goto next_desc;
-			}
-		}
-
-process_skb:
 		total_rx_bytes += (length - 4); /* don't count FCS */
 		total_rx_packets++;
 

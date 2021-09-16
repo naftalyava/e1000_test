@@ -272,7 +272,6 @@ struct e1000_adapter {
 
 	/* structs defined in e1000_hw.h */
 	struct e1000_hw hw;
-	struct e1000_hw_stats stats;
 
 	u32 test_icr;
 	struct e1000_tx_ring test_tx_ring;
@@ -295,8 +294,6 @@ struct e1000_adapter {
 
 	struct work_struct reset_task;
 	struct delayed_work watchdog_task;
-	struct delayed_work fifo_stall_task;
-	struct delayed_work phy_info_task;
 };
 
 enum e1000_state_t {
@@ -341,8 +338,6 @@ void e1000_free_all_rx_resources(struct e1000_adapter *adapter);
 void e1000_free_all_tx_resources(struct e1000_adapter *adapter);
 bool e1000_has_link(struct e1000_adapter *adapter);
 void e1000_power_up_phy(struct e1000_adapter *);
-void e1000_set_ethtool_ops(struct net_device *netdev);
-void e1000_check_options(struct e1000_adapter *adapter);
 char *e1000_get_hw_dev_name(struct e1000_hw *hw);
 
 #endif /* _E1000_H_ */
